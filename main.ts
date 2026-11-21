@@ -12,6 +12,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -48,9 +49,17 @@ function copyScreenshots() {
   cpSync(srcDir, dstDir, { recursive: true });
 }
 
+function emptyDir(dir: string) {
+  // Empty a directory without removing the directory itself: the grader
+  // mounts /output, and removing a mount point fails with EBUSY.
+  mkdirSync(dir, { recursive: true });
+  for (const entry of readdirSync(dir)) {
+    rmSync(join(dir, entry), { recursive: true, force: true });
+  }
+}
+
 function main() {
-  rmSync(outDir, { recursive: true, force: true });
-  mkdirSync(outDir, { recursive: true });
+  emptyDir(outDir);
   copyGame();
   copyScreenshots();
   const dossier = buildDossier(outDir, {
