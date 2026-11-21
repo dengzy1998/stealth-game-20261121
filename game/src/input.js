@@ -1,54 +1,110 @@
-// Keyboard and mouse input: WASD or arrows to move, Shift to sprint,
-// C or Ctrl to sneak, Space to start/confirm, E for a smoke pellet,
-// P or Escape to pause, M to mute. Clicking also confirms on menus.
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-export const ACTION_SMOKE = 4;
-export const ACTION_MUTE = 8;
+// SHADOWLINE input: the keyboard, read fresh every frame. Movement keys
+// give a direction vector; action keys are edge-triggered, so holding E
+// throws one smoke pellet, not a whole cloud of them.
 
-export function createInput(canvas) {
-  const keys = new Set();
-  let actions = 0;
-  let clicked = false;
+const KEYMAP = {
+  KeyW: 'up',
+  ArrowUp: 'up',
+  KeyS: 'down',
+  ArrowDown: 'down',
+  KeyA: 'left',
+  ArrowLeft: 'left',
+  KeyD: 'right',
+  ArrowRight: 'right',
+  ShiftLeft: 'sprint',
+  ShiftRight: 'sprint',
+  KeyC: 'sneak',
+  ControlLeft: 'sneak',
+  ControlRight: 'sneak',
+};
 
-  function onKeyDown(event) {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.code)) event.preventDefault();
-    if (event.repeat) return;
-    keys.add(event.code);
-    if (event.code === 'Space' || event.code === 'Enter') actions |= ACTION_CONFIRM;
-    if (event.code === 'KeyP' || event.code === 'Escape') actions |= ACTION_PAUSE;
-    if (event.code === 'KeyE') actions |= ACTION_SMOKE;
-    if (event.code === 'KeyM') actions |= ACTION_MUTE;
-  }
-  function onKeyUp(event) {
-    keys.delete(event.code);
-  }
-  function onMouseDown() {
-    clicked = true;
-  }
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  canvas.addEventListener('mousedown', onMouseDown);
-
+export function createInput() {
   return {
-    /** The held movement keys, as a direction object the world steps with. */
-    direction() {
-      return {
-        up: keys.has('KeyW') || keys.has('ArrowUp'),
-        down: keys.has('KeyS') || keys.has('ArrowDown'),
-        left: keys.has('KeyA') || keys.has('ArrowLeft'),
-        right: keys.has('KeyD') || keys.has('ArrowRight'),
-        sneak: keys.has('KeyC') || keys.has('ControlLeft') || keys.has('ControlRight'),
-        sprint: keys.has('ShiftLeft') || keys.has('ShiftRight'),
-        useSmoke: false,
-      };
-    },
-    /** One-shot actions since the last call (confirm, pause, smoke, mute, click). */
-    takeActions() {
-      const out = actions | (clicked ? ACTION_CONFIRM : 0);
-      actions = 0;
-      clicked = false;
-      return out;
-    },
+    keys: new Set(),
+    pressed: new Set(),
+    // The last movement direction, for menus that need it.
+    lastDir: { x: 0, y: 0 },
   };
+}
+
+// Attach listeners to the window. Returns a detach function.
+export function attachInput(input, onFirstGesture) {
+  let gestured = false;
+  const down = (event) => {
+    if (!gestured && onFirstGesture) {
+      gestured = true;
+      onFirstGesture();
+    }
+    const action = KEYMAP[event.code] || event.code;
+    if (
+      ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(
+        event.code,
+      )
+    ) {
+      event.preventDefault();
+    }
+    if (!event.repeat) input.pressed.add(action);
+    input.keys.add(action);
+  };
+  const up = (event) => {
+    const action = KEYMAP[event.code] || event.code;
+    input.keys.delete(action);
+  };
+  const blur = () => {
+    input.keys.clear();
+    input.pressed.clear();
+  };
+  window.addEventListener('keydown', down);
+  window.addEventListener('keyup', up);
+  window.addEventListener('blur', blur);
+  return () => {
+    window.removeEventListener('keydown', down);
+    window.removeEventListener('keyup', up);
+    window.removeEventListener('blur', blur);
+  };
+}
+
+// The movement vector for this frame, normalised, plus the stance and
+// action edges. Call once per fixed step, then clearEdges.
+export function readGameInput(input) {
+  let x = 0;
+  let y = 0;
+  if (input.keys.has('left')) x -= 1;
+  if (input.keys.has('right')) x += 1;
+  if (input.keys.has('up')) y -= 1;
+  if (input.keys.has('down')) y += 1;
+  if (x !== 0 || y !== 0) {
+    const len = Math.hypot(x, y);
+    input.lastDir = { x: x / len, y: y / len };
+  }
+  return {
+    x,
+    y,
+    sneak: input.keys.has('sneak'),
+    sprint: input.keys.has('sprint'),
+    smoke: input.pressed.has('KeyE'),
+    confirm: input.pressed.has('Space') || input.pressed.has('Enter'),
+    pause: input.pressed.has('KeyP') || input.pressed.has('Escape'),
+    mute: input.pressed.has('KeyM'),
+    hideout: input.pressed.has('KeyH'),
+    restart: input.pressed.has('KeyR'),
+    choice:
+      input.pressed.has('Digit1')
+        ? 0
+        : input.pressed.has('Digit2')
+          ? 1
+          : input.pressed.has('Digit3')
+            ? 2
+            : -1,
+  };
+}
+
+// Clear the edge-triggered keys after they have been read.
+export function clearEdges(input) {
+  input.pressed.clear();
+}
+
+// True when the key was pressed since the last clearEdges.
+export function wasPressed(input, code) {
+  return input.pressed.has(code);
 }

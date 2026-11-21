@@ -1,196 +1,239 @@
-// Guard AI: patrol, suspicion, investigation, chase, search, return.
-// A guard's suspicion of the player rises while the player is visible in
-// its cone (faster up close, in light, and when the player runs; slower in
-// shadow, while sneaking, and through distance) and drains when unseen.
-// At the suspicious threshold the guard walks to the last seen spot; at
-// full suspicion it raises the alarm and chases. A chase that loses the
-// player turns into a search, then the guard goes back to its patrol.
-import { ALARM, DETECT, GUARD, WARDEN } from './config.js';
-import { hasLineOfSight, inBush, inCone, inDark } from './vision.js';
+// SHADOWLINE guard AI: patrol, suspicion, investigation, chase, search
+// and return. A guard is a little state machine with eyes: suspicion
+// climbs while Wren is in the cone, drains while she is not, and the
+// state follows the suspicion.
 
-export const GUARD_PATROL = 'patrol';
-export const GUARD_SUSPICIOUS = 'suspicious';
-export const GUARD_ALERT = 'alert';
-export const GUARD_SEARCH = 'search';
-export const GUARD_RETURN = 'return';
+import { GUARD, WARDEN } from './config.js';
+import {
+  angleDiff,
+  detectRateFor,
+  findTilePath,
+  inBush,
+  inCone,
+} from './vision.js';
+import { moveToward } from './player.js';
+import { emitRing } from './noise.js';
 
-export function createGuard(def, index) {
-  const first = def.waypoints[0];
+// The speed table for a guard or warden, merged from the base guard
+// numbers. A warden without its own investigate speed would move at
+// undefined px/s the moment it got curious — NaN, and the guard would
+// vanish from the floor. Every state has a real number here.
+export function guardStats(warden) {
+  if (warden) {
+    return {
+      patrolSpeed: WARDEN.patrolSpeed,
+      investigateSpeed: WARDEN.investigateSpeed,
+      chaseSpeed: WARDEN.chaseSpeed,
+      catchDistance: WARDEN.catchDistance,
+      viewRange: WARDEN.viewRange,
+      halfAngle: WARDEN.halfAngle,
+      detectRate: WARDEN.detectRate,
+    };
+  }
   return {
-    index,
-    warden: Boolean(def.warden),
-    waypoints: def.waypoints.map(([col, row]) => ({ x: col * 40 + 20, y: row * 40 + 20 })),
-    pause: def.pause,
-    x: first[0] * 40 + 20,
-    y: first[1] * 40 + 20,
-    angle: 0,
-    waypointIndex: 1,
-    waitTimer: 0,
-    state: GUARD_PATROL,
-    suspicion: 0,
-    lastSeen: null,
-    lookTimer: 0,
-    chaseTimer: 0,
-    searchPoint: null,
-    speed: 0,
-    stepTimer: 0,
-    heardNoise: null,
+    patrolSpeed: GUARD.patrolSpeed,
+    investigateSpeed: GUARD.investigateSpeed,
+    chaseSpeed: GUARD.chaseSpeed,
+    catchDistance: GUARD.catchDistance,
+    viewRange: GUARD.viewRange,
+    halfAngle: GUARD.halfAngle,
+    detectRate: GUARD.detectRate,
   };
 }
 
-function guardSpeed(guard, alarmHot) {
-  const base = guard.warden ? WARDEN : GUARD;
-  if (guard.state === GUARD_ALERT) return base.chaseSpeed;
-  if (guard.state === GUARD_SUSPICIOUS || guard.state === GUARD_SEARCH) return base.investigateSpeed;
-  return base.patrolSpeed * (alarmHot ? 1.25 : 1);
+// Build one guard from a level's patrol definition. Starts at its first
+// waypoint, facing the second.
+export function makeGuard(def) {
+  const stats = guardStats(def.warden);
+  const first = def.waypoints[0];
+  const second = def.waypoints[1] || first;
+  return {
+    x: first.x,
+    y: first.y,
+    dir: Math.atan2(second.y - first.y, second.x - first.x),
+    radius: 12,
+    warden: def.warden,
+    waypoints: def.waypoints,
+    waypointIndex: 1,
+    state: 'patrol',
+    suspicion: 0,
+    lastSeenX: first.x,
+    lastSeenY: first.y,
+    seenTimer: 0,
+    waitTimer: 0,
+    stateTimer: 0,
+    stepTimer: 0,
+    alerted: false,
+    // The tile path the guard is walking along on patrol, and how far
+    // along it it is. A straight line between two waypoints can clip a
+    // wall; a tile path never does.
+    path: [],
+    pathIndex: 0,
+    ...stats,
+  };
 }
 
-/** Move toward (tx,ty) at `speed`, sliding along walls; returns true on arrival. */
-export function moveToward(guard, tx, ty, speed, dt, walls) {
-  const dx = tx - guard.x;
-  const dy = ty - guard.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist < 2) return true;
-  const step = Math.min(dist, speed * dt);
-  const nx = guard.x + (dx / dist) * step;
-  const ny = guard.y + (dy / dist) * step;
-  guard.angle = Math.atan2(dy, dx);
-  if (!hitsWall(nx, guard.y, GUARD.radius, walls)) guard.x = nx;
-  if (!hitsWall(guard.x, ny, GUARD.radius, walls)) guard.y = ny;
-  return Math.hypot(tx - guard.x, ty - guard.y) < 3;
-}
-
-function hitsWall(x, y, radius, walls) {
-  for (let i = 0; i < walls.length; i += 1) {
-    const w = walls[i];
-    const cx = Math.max(w.x, Math.min(x, w.x + w.w));
-    const cy = Math.max(w.y, Math.min(y, w.y + w.h));
-    if (Math.hypot(x - cx, y - cy) < radius) return true;
+// Can this guard see Wren right now? A guard never sees through a bush
+// Wren is crouched in unless it is nearly on top of her.
+export function guardSeesPlayer(world, guard, player) {
+  if (!inCone(world, guard, player.x, player.y)) return false;
+  if (inBush(world, player.x, player.y)) {
+    const dist = Math.hypot(player.x - guard.x, player.y - guard.y);
+    if (dist > 55) return false;
   }
-  return false;
+  return true;
 }
 
-/**
- * One guard's step. `player` carries x, y, stance ('walk' | 'sneak' | 'sprint')
- * and hidden (in a bush while sneaking). Returns 'caught' when this guard
- * touches the player, 'alerted' the moment it first goes alert, else null.
- */
-export function stepGuard(guard, dt, world) {
-  const { player, level, smokes, alarm } = world;
-  const base = guard.warden ? WARDEN : GUARD;
-  const alarmHot = alarm >= ALARM.hotAt;
-  let event = null;
-
-  // --- Seeing: is the player in the cone, with a clear line, right now? ---
-  const hidden = player.hidden;
-  const dist = Math.hypot(player.x - guard.x, player.y - guard.y);
-  let seen = false;
-  let rate = 0;
-  if (!hidden || dist < GUARD.hiddenSpotRange) {
-    if (inCone(guard, player.x, player.y) && hasLineOfSight(guard.x, guard.y, player.x, player.y, level.walls, smokes)) {
-      seen = true;
-      rate = base.detectRate;
-      rate *= 1 / (1 + Math.max(0, dist - DETECT.falloffRange) / DETECT.falloffRange);
-      if (inDark(player.x, player.y, level.dark)) rate *= DETECT.inShadow;
-      if (player.stance === 'sneak') rate *= DETECT.sneaking;
-      else if (player.stance === 'sprint') rate *= DETECT.sprinting;
-      if (world.upgrades.has('cloak')) rate *= 0.75;
-    }
-  }
-
-  if (seen) {
-    guard.suspicion = Math.min(GUARD.alertAt, guard.suspicion + rate * dt);
-    guard.lastSeen = { x: player.x, y: player.y };
-    guard.chaseTimer = GUARD.chaseMemory;
-    if (guard.suspicion >= GUARD.alertAt && guard.state !== GUARD_ALERT) {
-      guard.state = GUARD_ALERT;
-      event = 'alerted';
-    } else if (guard.suspicion >= GUARD.suspiciousAt && guard.state === GUARD_PATROL) {
-      guard.state = GUARD_SUSPICIOUS;
-    }
+// One fixed step of one guard. Returns nothing; mutates the guard and,
+// through the world, the alarm and the caught flag.
+export function updateGuard(world, guard, player, dt) {
+  const sees = guardSeesPlayer(world, guard, player);
+  if (sees) {
+    guard.lastSeenX = player.x;
+    guard.lastSeenY = player.y;
+    guard.seenTimer = 0;
+    const rate = detectRateFor(world, guard, player);
+    guard.suspicion = Math.min(100, guard.suspicion + rate * dt);
   } else {
-    const decay = GUARD.suspicionDecay * (alarmHot ? 0.6 : 1) * (guard.state === GUARD_ALERT ? 0.35 : 1);
-    guard.suspicion = Math.max(0, guard.suspicion - decay * dt);
-    if (guard.state === GUARD_ALERT) {
-      guard.chaseTimer -= dt;
-      if (guard.chaseTimer <= 0) {
-        guard.state = GUARD_SEARCH;
-        guard.searchPoint = guard.lastSeen ? { ...guard.lastSeen } : { x: guard.x, y: guard.y };
-        guard.lookTimer = GUARD.lookAroundTime;
+    guard.seenTimer += dt;
+    guard.suspicion = Math.max(0, guard.suspicion - GUARD.suspicionDecay * dt);
+  }
+
+  const wasAlert = guard.state === 'alert';
+  if (guard.suspicion >= GUARD.alertAt && guard.state !== 'alert') {
+    guard.state = 'alert';
+    guard.stateTimer = 0;
+    if (!guard.alerted) {
+      guard.alerted = true;
+      world.alarm = Math.min(100, world.alarm + 20);
+      world.everSpotted = true;
+      world.onAlert();
+    }
+  } else if (
+    guard.suspicion >= GUARD.suspiciousAt &&
+    guard.state !== 'alert' &&
+    guard.state !== 'suspicious'
+  ) {
+    guard.state = 'suspicious';
+    guard.stateTimer = 0;
+  } else if (
+    guard.state === 'alert' &&
+    guard.seenTimer > GUARD.chaseMemory &&
+    guard.suspicion < GUARD.alertAt
+  ) {
+    guard.state = 'search';
+    guard.stateTimer = 0;
+  } else if (guard.state === 'suspicious' && guard.suspicion < GUARD.suspiciousAt) {
+    guard.state = 'return';
+    guard.stateTimer = 0;
+  } else if (guard.state === 'search' && guard.stateTimer > GUARD.lookAround) {
+    guard.state = 'return';
+    guard.stateTimer = 0;
+  } else if (guard.state === 'return' && guard.stateTimer > 1.2) {
+    guard.state = 'patrol';
+    guard.stateTimer = 0;
+    guard.alerted = false;
+  }
+  if (!wasAlert && guard.state === 'alert') {
+    guard.stateTimer = 0;
+  }
+  guard.stateTimer += dt;
+
+  // Move according to state. On patrol (and on the way back) the guard
+  // follows a tile path to its waypoint, so it walks the corridors
+  // instead of cutting through walls. Chasing and investigating go
+  // straight at the last-seen spot, sliding along walls on the way.
+  const stepGuard = (tx, ty, speed) => {
+    const beforeX = guard.x;
+    const beforeY = guard.y;
+    const left = moveToward(world, guard, tx, ty, speed, dt);
+    const moved = Math.hypot(guard.x - beforeX, guard.y - beforeY);
+    if (moved > 0.5) {
+      guard.dir = Math.atan2(guard.y - beforeY, guard.x - beforeX);
+      guard.stepTimer -= dt;
+      if (guard.stepTimer <= 0) {
+        guard.stepTimer = guard.state === 'alert' ? 0.28 : 0.45;
+        emitRing(world, guard.x, guard.y, guard.state === 'alert' ? 26 : 18, guard.warden);
+        const pan = Math.max(-1, Math.min(1, (guard.x - player.x) / 400));
+        world.onStep(pan);
       }
     }
-    if (guard.state === GUARD_SUSPICIOUS && guard.suspicion < GUARD.suspiciousAt * 0.5) {
-      guard.state = GUARD_RETURN;
-    }
-  }
+    return left;
+  };
 
-  // --- Hearing: a noise pulse the guard can hear pulls it to investigate. ---
-  if (guard.heardNoise && guard.state === GUARD_PATROL) {
-    guard.state = GUARD_SUSPICIOUS;
-    guard.lastSeen = { ...guard.heardNoise };
-    guard.heardNoise = null;
-  }
-
-  // --- Moving, by state. ---
-  const speed = guardSpeed(guard, alarmHot);
-  guard.speed = speed;
-  if (guard.state === GUARD_PATROL) {
-    const target = guard.waypoints[guard.waypointIndex];
-    if (guard.waitTimer > 0) {
-      guard.waitTimer -= dt;
-      guard.angle += dt * 0.6; // glance around while waiting
-    } else if (moveToward(guard, target.x, target.y, speed, dt, level.walls)) {
-      guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
-      guard.waitTimer = guard.pause;
+  if (guard.state === 'patrol' && guard.waitTimer > 0) {
+    // Waiting at a waypoint: a slow sweep of the room.
+    guard.waitTimer -= dt;
+    guard.dir += Math.sin(world.time * 1.4 + guard.waypointIndex) * 0.2 * dt;
+  } else if (guard.state === 'patrol' || guard.state === 'return') {
+    const wp = guard.waypoints[guard.waypointIndex];
+    if (!guard.path || guard.pathTarget !== guard.waypointIndex) {
+      guard.path = findTilePath(world, guard.x, guard.y, wp.x, wp.y) || [];
+      guard.pathTarget = guard.waypointIndex;
+      guard.pathIndex = 0;
     }
-  } else if (guard.state === GUARD_SUSPICIOUS) {
-    const spot = guard.lastSeen || guard.waypoints[guard.waypointIndex];
-    if (moveToward(guard, spot.x, spot.y, speed, dt, level.walls)) {
-      guard.lookTimer -= dt;
-      guard.angle += dt * 1.4; // scan the area
-      if (guard.lookTimer <= 0) {
-        guard.state = GUARD_RETURN;
-        guard.lookTimer = GUARD.lookAroundTime;
+    const node = guard.path[guard.pathIndex];
+    if (node) {
+      const left = stepGuard(node.x, node.y, guard.patrolSpeed);
+      if (left < 4) guard.pathIndex++;
+    } else if (guard.path.length === 0) {
+      // No tile path (the waypoint is not on the floor graph from here):
+      // walk straight at it and let the wall sliding sort it out.
+      const left = stepGuard(wp.x, wp.y, guard.patrolSpeed);
+      if (left < 6) {
+        guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
+        guard.path = null;
+        if (guard.state === 'patrol') guard.waitTimer = 1.4;
+        else {
+          guard.state = 'patrol';
+          guard.stateTimer = 0;
+        }
       }
     } else {
-      guard.lookTimer = GUARD.lookAroundTime;
+      // Arrived at the waypoint: next one, after a look around.
+      guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
+      guard.path = [];
+      guard.pathIndex = 0;
+      if (guard.state === 'patrol') guard.waitTimer = 1.4;
+      else {
+        guard.state = 'patrol';
+        guard.stateTimer = 0;
+      }
     }
-  } else if (guard.state === GUARD_ALERT) {
-    const spot = guard.lastSeen || { x: player.x, y: player.y };
-    moveToward(guard, spot.x, spot.y, speed, dt, level.walls);
-  } else if (guard.state === GUARD_SEARCH) {
-    if (moveToward(guard, guard.searchPoint.x, guard.searchPoint.y, speed, dt, level.walls)) {
-      guard.lookTimer -= dt;
-      guard.angle += dt * 1.8;
-      if (guard.lookTimer <= 0) guard.state = GUARD_RETURN;
+  } else if (guard.state === 'suspicious' || guard.state === 'search') {
+    const left = stepGuard(guard.lastSeenX, guard.lastSeenY, guard.investigateSpeed);
+    if (left < 6) {
+      // Arrived at the last-seen spot: stand and sweep the room.
+      guard.dir += 0.9 * dt;
     }
-  } else if (guard.state === GUARD_RETURN) {
-    // Walk back to the nearest patrol waypoint, then resume the loop.
-    let nearest = guard.waypoints[0];
-    let best = Infinity;
-    for (const w of guard.waypoints) {
-      const d = Math.hypot(w.x - guard.x, w.y - guard.y);
-      if (d < best) { best = d; nearest = w; }
-    }
-    if (moveToward(guard, nearest.x, nearest.y, speed, dt, level.walls)) {
-      guard.waypointIndex = guard.waypoints.indexOf(nearest);
-      guard.state = GUARD_PATROL;
-    }
+  } else if (guard.state === 'alert') {
+    stepGuard(guard.lastSeenX, guard.lastSeenY, guard.chaseSpeed);
   }
 
-  // --- Footsteps: a soft tick the player can hear, faster when the guard hurries. ---
-  guard.stepTimer -= dt;
-  if (guard.stepTimer <= 0 && guard.speed > 0) {
-    guard.stepTimer = guard.state === GUARD_ALERT ? 0.3 : 0.55;
-    world.guardSteps.push({ x: guard.x, y: guard.y, warden: guard.warden, alert: guard.state === GUARD_ALERT });
+  // Catch: only a guard that has actually spotted Wren can catch her.
+  // A patrolling guard that merely bumps into her gets a shock instead:
+  // at point-blank range the guard spots her instantly and gives chase.
+  const pdx = player.x - guard.x;
+  const pdy = player.y - guard.y;
+  const pdist = Math.hypot(pdx, pdy);
+  if (pdist < 45 && !inBush(world, player.x, player.y) && guard.state !== 'alert') {
+    guard.suspicion = 100;
+    guard.lastSeenX = player.x;
+    guard.lastSeenY = player.y;
   }
-
-  // --- Caught: a guard that reaches the player ends the heist. ---
-  if (Math.hypot(player.x - guard.x, player.y - guard.y) < base.catchDistance) return 'caught';
-  return event;
+  if (
+    guard.state === 'alert' &&
+    pdist < guard.catchDistance &&
+    !inBush(world, player.x, player.y)
+  ) {
+    world.over = 'caught';
+    world.caughtBy = guard.warden ? 'warden' : 'guard';
+  }
 }
 
-/** A guard's alertness as 0..1 for the HUD and the cone colour. */
-export function guardAlertness(guard) {
-  return guard.suspicion / GUARD.alertAt;
+// The mark drawn above a guard's head: '?' while curious, '!' while alert.
+export function guardMark(guard) {
+  if (guard.state === 'alert') return '!';
+  if (guard.state === 'suspicious' || guard.state === 'search') return '?';
+  return '';
 }

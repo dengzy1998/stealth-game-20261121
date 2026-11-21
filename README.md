@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/best-stealth-game-20261121-1759/dengzy1998/stealth-game-20261121/rank.svg)](https://make.fun/bounty/best-stealth-game-20261121-1759/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-stealth-game-20261121-1759)
 [![reward](https://make.fun/badge/best-stealth-game-20261121-1759/dengzy1998/stealth-game-20261121/reward.svg)](https://make.fun/bounty/best-stealth-game-20261121-1759?utm_source=github&utm_medium=readme&utm_campaign=best-stealth-game-20261121-1759)
 
-SHADOWLINE is an original top-down stealth game written in plain JavaScript and canvas 2D, with no external assets. You are Wren, a thief pulling three heists — the Marble Museum, the Gilded Casino and the Sky Gallery. Slip past vision cones that are raycast-clipped by walls and smoke, mind the noise your footsteps make, hide in bushes and dark floor, and grab the target before the exit opens. Guards patrol waypoints and their suspicion climbs while you are in their cone (faster up close, in light and while sprinting; slower in shadow and while sneaking); a curious guard walks over to look ("?"), a fully alert one raises the alarm and chases ("!"). Thirteen guards, two of them elite Wardens with wider cones and sharper eyes, stand between you and the loot. Between heists you pick one of three gadgets — Soft Boots, Smoke Pellet, Shadow Cloak, Swift Step, Keen Eye or Greased Palm — and banked loot buys permanent gear in the hideout. Score is loot plus a time bonus, a $500 ghost bonus for never being spotted and a $300 clean sweep; get caught and the heist is blown. Synthesized WebAudio sound, a minimap, a live visibility readout and a HUD tracking alarm, loot, timer, score and smoke round out the job.
+**SHADOWLINE — A Thief in Three Heists.** A top-down 2D canvas stealth game with no libraries and no network requests: every sound is synthesised in code. You play Wren, a thief, through three heists — the Marble Museum, the Gilded Casino and the Sky Gallery — against 14 patrolling guards and 3 elite wardens whose vision cones are raycast-clipped by walls and smoke. Suspicion climbs while you are seen and drains while you are not; at 55 a guard comes to look, at 100 the whole floor chases you and the alarm rises. Sprint and you ring out across the room; sneak through the bushes and shadows and nobody knows you were there. Between heists you pick one of 6 gadgets, and the loot you bank buys permanent gear in the hideout. Grab the target, reach the exit unseen, and take the ghost bonus.
 
 ## Run it
 
@@ -12,7 +12,7 @@ SHADOWLINE is an original top-down stealth game written in plain JavaScript and 
 node serve.ts
 ```
 
-Then open http://localhost:8080 in a desktop browser. The game is fully static: everything it loads lives under `game/`, and it makes no network requests. You can also open `game/index.html` directly, and `game/index.html?shot=play` (or `title`, `upgrade`, `win`) stages a screenshot scene.
+Then open http://localhost:8080 — WASD to move, Shift to sprint, C to sneak, E for a smoke pellet, P to pause, M to mute, H for the hideout, R to restart a heist.
 
 ---
 

@@ -1,48 +1,66 @@
-// SHADOWLINE — the entry program (Node 22, standard library only): the game
-// is this directory's game/ folder, plain static files a desktop browser
-// loads offline (game/index.html and its ES modules, no library and no
-// network request), and the program hands it in. It copies game/ and the
-// four declared screenshots from beside this file to /output and writes
-// /output/dossier.json, the summary the judge reads, with the vendored
-// make.fun library. Only the shots named in shots.json are copied: the
-// screenshot harness also writes its report.json beside them, and that
-// report is a dev tool, not a fifth screenshot.
+// SHADOWLINE's hand-in program: it copies game/ and the screenshots named
+// in shots.json into the output directory and writes dossier.json with
+// buildDossier from vendor/makefun-game.ts. Node 22 standard library only,
+// no network, deterministic: two runs write the same bytes.
 //
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// The screenshots trap: the screenshot harness writes report.json into
+// screenshots/, and the dossier refuses more than 4 images. So this
+// program copies ONLY the shots named in shots.json (falling back to the
+// whole directory only when shots.json is absent).
 
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const root = dirname(fileURLToPath(import.meta.url));
+const outDir = process.env.MAKEFUN_OUTPUT_DIR || '/output';
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'shots.json'))) {
-  const shots = JSON.parse(readFileSync(join(here, 'shots.json'), 'utf8'));
-  for (const shot of shots) {
-    cpSync(join(here, 'screenshots', shot.name), join(out, 'screenshots', shot.name));
-  }
-} else if (existsSync(join(here, 'screenshots'))) {
-  cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+function copyGame() {
+  const src = join(root, 'game');
+  const dst = join(outDir, 'game');
+  cpSync(src, dst, { recursive: true });
 }
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
-// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
-// files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
-// screenshots/ and dossier.json).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
+function copyScreenshots() {
+  const srcDir = join(root, 'screenshots');
+  const dstDir = join(outDir, 'screenshots');
+  mkdirSync(dstDir, { recursive: true });
+  const manifestPath = join(root, 'shots.json');
+  if (existsSync(manifestPath)) {
+    const shots = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    for (const shot of shots) {
+      const name = shot.name;
+      if (typeof name !== 'string' || name.includes('/') || name.includes('..')) {
+        throw new Error(`main.ts: shots.json names an unsafe file: ${name}`);
+      }
+      cpSync(join(srcDir, name), join(dstDir, name));
+    }
+    return;
+  }
+  cpSync(srcDir, dstDir, { recursive: true });
+}
+
+function main() {
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  copyGame();
+  copyScreenshots();
+  const dossier = buildDossier(outDir, {
     text_max_bytes: 163840,
     screenshots: { max: 4, max_bytes: 262144 },
     game_max_files: 993,
     game_max_bytes: 50331648,
     game_path_max_bytes: 1000,
-  }),
-);
+  });
+  writeFileSync(join(outDir, 'dossier.json'), dossier);
+}
+
+main();

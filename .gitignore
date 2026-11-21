@@ -1,6 +1,6 @@
-node_modules
 node_modules/
 out/
+out1/
 out2/
 screenshots/report.json
-submission.txt
+.DS_Store

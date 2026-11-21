@@ -1,123 +1,124 @@
-// Sound, all synthesised in code — no audio files. Footsteps are short
-// filtered noise ticks (softer when sneaking, louder when sprinting);
-// guards' steps are lower ticks panned toward where the guard is; pickups
-// chime, alarms sting, and a low drone hums under the title screen.
-export function createAudio() {
-  const audio = {
-    context: null,
-    master: null,
-    muted: false,
-    droneNodes: null,
-    ensure() {
-      if (audio.context) {
-        if (audio.context.state === 'suspended') audio.context.resume().catch(() => {});
-        return;
-      }
-      try {
-        const Ctor = window.AudioContext || window.webkitAudioContext;
-        audio.context = new Ctor();
-        audio.master = audio.context.createGain();
-        audio.master.gain.value = 0.5;
-        audio.master.connect(audio.context.destination);
-      } catch {
-        audio.context = null;
-      }
-    },
-    setMuted(muted) {
-      audio.muted = muted;
-      if (audio.master) audio.master.gain.value = muted ? 0 : 0.5;
-    },
-    tick(freq, duration, volume, type = 'sine') {
-      if (!audio.context || audio.muted) return;
-      const now = audio.context.currentTime;
-      const osc = audio.context.createOscillator();
-      const gain = audio.context.createGain();
-      osc.type = type;
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(volume, now);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-      osc.connect(gain).connect(audio.master);
-      osc.start(now);
-      osc.stop(now + duration);
-    },
-    noiseTick(volume, pan, lowpass = 900) {
-      if (!audio.context || audio.muted) return;
-      const now = audio.context.currentTime;
-      const length = Math.floor(audio.context.sampleRate * 0.07);
-      const buffer = audio.context.createBuffer(1, length, audio.context.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < length; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / length);
-      const source = audio.context.createBufferSource();
-      source.buffer = buffer;
-      const filter = audio.context.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.value = lowpass;
-      const gain = audio.context.createGain();
-      gain.gain.value = volume;
-      const panner = audio.context.createStereoPanner ? audio.context.createStereoPanner() : null;
-      if (panner) {
-        panner.pan.value = Math.max(-1, Math.min(1, pan));
-        source.connect(filter).connect(gain).connect(panner).connect(audio.master);
-      } else {
-        source.connect(filter).connect(gain).connect(audio.master);
-      }
-      source.start(now);
-    },
-    /** The player's own step: pan 0 (centred), volume by stance. */
-    footstep(stance) {
-      if (stance === 'sneak') audio.noiseTick(0.05, 0, 500);
-      else if (stance === 'sprint') audio.noiseTick(0.22, 0, 1100);
-      else audio.noiseTick(0.11, 0, 800);
-    },
-    /** A guard's step, panned toward the guard's screen position. */
-    guardStep(pan, alert) {
-      audio.noiseTick(alert ? 0.16 : 0.08, pan, alert ? 700 : 420);
-    },
-    pickup() {
-      audio.tick(880, 0.12, 0.16);
-      setTimeout(() => audio.tick(1318, 0.18, 0.14), 70);
-    },
-    target() {
-      [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => audio.tick(f, 0.22, 0.15), i * 90));
-    },
-    alert() {
-      audio.tick(196, 0.25, 0.22, 'sawtooth');
-      setTimeout(() => audio.tick(147, 0.35, 0.22, 'sawtooth'), 160);
-    },
-    caught() {
-      [330, 262, 196, 131].forEach((f, i) => setTimeout(() => audio.tick(f, 0.3, 0.2, 'triangle'), i * 130));
-    },
-    win() {
-      [523, 659, 784, 1046, 1318].forEach((f, i) => setTimeout(() => audio.tick(f, 0.3, 0.14), i * 100));
-    },
-    click() {
-      audio.tick(660, 0.06, 0.1);
-    },
-    startDrone() {
-      if (!audio.context || audio.muted || audio.droneNodes) return;
-      const osc = audio.context.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = 55;
-      const osc2 = audio.context.createOscillator();
-      osc2.type = 'sine';
-      osc2.frequency.value = 55.7;
-      const gain = audio.context.createGain();
-      gain.gain.value = 0.05;
-      osc.connect(gain);
-      osc2.connect(gain);
-      gain.connect(audio.master);
-      osc.start();
-      osc2.start();
-      audio.droneNodes = { osc, osc2, gain };
-    },
-    stopDrone() {
-      if (!audio.droneNodes) return;
-      try {
-        audio.droneNodes.osc.stop();
-        audio.droneNodes.osc2.stop();
-      } catch { /* already stopped */ }
-      audio.droneNodes = null;
-    },
-  };
-  return audio;
+// SHADOWLINE audio: every sound is synthesised in code with WebAudio —
+// no audio files, no network. Footsteps tick left or right, coins blip,
+// smoke whooshes, and an alert stings. Everything is guarded so the game
+// runs silent when the browser has not given us an audio context yet.
+
+let ctx = null;
+let master = null;
+let muted = false;
+
+export function setMuted(value) {
+  muted = value;
+  if (master) master.gain.value = value ? 0 : 0.5;
+}
+
+export function isMuted() {
+  return muted;
+}
+
+// Create the audio context on the first user gesture. Called from the
+// key handler, never on page load, so autoplay rules never bite.
+export function ensureAudio() {
+  if (typeof window === 'undefined') return null;
+  if (!ctx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = muted ? 0 : 0.5;
+      master.connect(ctx.destination);
+    } catch {
+      return null;
+    }
+  }
+  if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  return ctx;
+}
+
+// A short blip at a frequency, with a quick fade.
+function blip(freq, duration, type, volume, when = 0) {
+  if (!ctx || !master || muted) return;
+  const t = ctx.currentTime + when;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t);
+  gain.gain.setValueAtTime(volume, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+  osc.connect(gain);
+  gain.connect(master);
+  osc.start(t);
+  osc.stop(t + duration + 0.02);
+}
+
+// Filtered noise: the raw material of footsteps, smoke and alarms.
+function noiseBurst(duration, filterFreq, volume, pan = 0, when = 0) {
+  if (!ctx || !master || muted) return;
+  const t = ctx.currentTime + when;
+  const len = Math.max(1, Math.floor(ctx.sampleRate * duration));
+  const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = filterFreq;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(volume, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+  const panner =
+    ctx.createStereoPanner !== undefined ? ctx.createStereoPanner() : null;
+  source.connect(filter);
+  filter.connect(gain);
+  if (panner) {
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+    gain.connect(panner);
+    panner.connect(master);
+  } else {
+    gain.connect(master);
+  }
+  source.start(t);
+}
+
+// A guard's footstep: a soft tick, panned by where the guard stands
+// relative to Wren, so the ears know what the eyes have not seen yet.
+export function playStep(pan) {
+  noiseBurst(0.06, 900, 0.12, pan);
+}
+
+// A loot pickup: two bright notes, up.
+export function playPickup() {
+  blip(880, 0.09, 'sine', 0.2);
+  blip(1318, 0.12, 'sine', 0.18, 0.07);
+}
+
+// A smoke pellet: a low whoosh.
+export function playSmoke() {
+  noiseBurst(0.5, 420, 0.25);
+}
+
+// A guard's suspicion turning to a full alert: a sharp two-note sting.
+export function playAlert() {
+  blip(220, 0.16, 'square', 0.16);
+  blip(165, 0.3, 'square', 0.16, 0.12);
+}
+
+// Caught: a low falling note.
+export function playCaught() {
+  blip(330, 0.5, 'sawtooth', 0.18);
+  blip(196, 0.7, 'sawtooth', 0.16, 0.15);
+}
+
+// A heist finished: a small rising arpeggio.
+export function playWin() {
+  blip(523, 0.12, 'sine', 0.2);
+  blip(659, 0.12, 'sine', 0.2, 0.1);
+  blip(784, 0.2, 'sine', 0.2, 0.2);
+}
+
+// A soft UI click for menus.
+export function playClick() {
+  blip(660, 0.05, 'sine', 0.12);
 }
