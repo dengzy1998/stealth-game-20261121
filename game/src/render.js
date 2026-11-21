@@ -434,7 +434,7 @@ export function createRenderer(canvas) {
     ctx.fillRect(0, 0, FIELD.width, FIELD.height);
     text('S H A D O W L I N E', FIELD.width / 2, 150, 84, PALETTE.text, 'center', 900);
     text('A THIEF IN THREE HEISTS', FIELD.width / 2, 205, 20, PALETTE.gold, 'center', 700);
-    text('3 heists · 13 guards · 2 elite wardens · 6 gadgets · a hideout to grow', FIELD.width / 2, 250, 16, PALETTE.muted, 'center');
+    text('3 heists · 14 guards · 3 elite wardens · 6 gadgets · a hideout to grow', FIELD.width / 2, 250, 16, PALETTE.muted, 'center');
     text('Slip past the cones. Take the target. Reach the exit unseen.', FIELD.width / 2, 282, 16, PALETTE.text, 'center');
     panel(FIELD.width / 2 - 330, 320, 660, 132, 0.95);
     text('HOW TO PLAY', FIELD.width / 2, 342, 14, PALETTE.gold, 'center', 800);
